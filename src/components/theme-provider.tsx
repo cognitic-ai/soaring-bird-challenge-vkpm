@@ -5,11 +5,8 @@ import {
 } from "@react-navigation/native";
 import { useColorScheme } from "react-native";
 
-const useScheme =
-  process.env.EXPO_OS === "web" ? () => "light" : useColorScheme;
-
 export function ThemeProvider(props: { children: React.ReactNode }) {
-  const colorScheme = useScheme();
+  const colorScheme = useColorScheme();
   return (
     <RNTheme value={colorScheme === "dark" ? DarkTheme : DefaultTheme}>
       {props.children}
