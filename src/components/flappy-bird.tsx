@@ -7,13 +7,10 @@ import Animated, {
   FadeInUp,
   FadeOut,
   ZoomIn,
-  runOnJS,
   useAnimatedStyle,
-  useFrameCallback,
   useSharedValue,
   withRepeat,
   withSequence,
-  withSpring,
   withTiming,
 } from "react-native-reanimated";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -54,10 +51,22 @@ export default function FlappyBird() {
   const [score, setScore] = useState(0);
   const [bestScore, setBestScore] = useState(0);
   const [pipes, setPipes] = useState<Pipe[]>([]);
+  const [birdTop, setBirdTop] = useState(GAME_H * 0.42);
+  const [birdRot, setBirdRot] = useState(0);
+  const [groundX, setGroundX] = useState(0);
 
-  const birdY = useSharedValue(GAME_H * 0.42);
-  const birdVelocity = useSharedValue(0);
-  const birdRotation = useSharedValue(0);
+  // Refs for mutable game state
+  const birdYRef = useRef(GAME_H * 0.42);
+  const birdVelRef = useRef(0);
+  const birdRotRef = useRef(0);
+  const pipesRef = useRef<Pipe[]>([]);
+  const scoreRef = useRef(0);
+  const gsRef = useRef<GameState>("menu");
+  const lastSpawnRef = useRef(0);
+  const pipeIdRef = useRef(0);
+  const groundXRef = useRef(0);
+  const rafRef = useRef<number>(0);
+  const lastTimeRef = useRef(0);
 
   // Idle bob for menu
   const idleBob = useSharedValue(0);
@@ -76,42 +85,26 @@ export default function FlappyBird() {
     }
   }, [gameState]);
 
-  // Scrolling ground offset
-  const groundOffset = useSharedValue(0);
-
-  const pipesRef = useRef<Pipe[]>([]);
-  const scoreRef = useRef(0);
-  const gsRef = useRef<GameState>("menu");
-  const lastSpawn = useRef(0);
-  const pipeId = useRef(0);
-
   useEffect(() => {
     gsRef.current = gameState;
   }, [gameState]);
 
-  // ---- animated styles ----
-  const birdStyle = useAnimatedStyle(() => ({
-    transform: [
-      { translateY: birdY.value + (gsRef.current === "menu" ? idleBob.value : 0) },
-      { rotate: `${birdRotation.value}deg` },
-    ],
+  // Bird animated style (for idle bob on menu only)
+  const birdMenuStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: idleBob.value }],
   }));
 
-  const groundStyle = useAnimatedStyle(() => ({
-    transform: [{ translateX: groundOffset.value }],
-  }));
-
-  // ---- helpers ----
+  // ---- collision detection ----
   const checkCollision = useCallback(
     (y: number, cp: Pipe[]): boolean => {
       if (y <= 0 || y + BIRD_H >= GAME_H) return true;
       for (const p of cp) {
-        const pl = p.x,
-          pr = p.x + PIPE_WIDTH;
-        const bl = BIRD_X - BIRD_W / 2 + 4,
-          br = BIRD_X + BIRD_W / 2 - 4;
-        const bt = y + 4,
-          bb = y + BIRD_H - 4;
+        const pl = p.x;
+        const pr = p.x + PIPE_WIDTH;
+        const bl = BIRD_X - BIRD_W / 2 + 4;
+        const br = BIRD_X + BIRD_W / 2 - 4;
+        const bt = y + 4;
+        const bb = y + BIRD_H - 4;
         if (br > pl && bl < pr) {
           if (bt < p.gapY - PIPE_GAP / 2 || bb > p.gapY + PIPE_GAP / 2)
             return true;
@@ -122,94 +115,129 @@ export default function FlappyBird() {
     [GAME_H, BIRD_X]
   );
 
-  const handleGameOver = useCallback(() => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-    setGameState("gameover");
-    setBestScore((prev) => Math.max(prev, scoreRef.current));
-  }, []);
+  // ---- GAME LOOP via requestAnimationFrame ----
+  useEffect(() => {
+    let running = true;
 
-  const handleScore = useCallback(() => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    scoreRef.current += 1;
-    setScore(scoreRef.current);
-  }, []);
+    const tick = (timestamp: number) => {
+      if (!running) return;
 
-  const syncPipes = useCallback((p: Pipe[]) => setPipes([...p]), []);
-
-  // ---- game loop ----
-  useFrameCallback((info) => {
-    // Animate ground always (menu + playing)
-    if (gsRef.current !== "gameover") {
-      groundOffset.value -= PIPE_SPEED;
-      if (groundOffset.value <= -48) groundOffset.value = 0;
-    }
-
-    if (gsRef.current !== "playing") return;
-    const now = info.timeSinceFirstFrame;
-
-    birdVelocity.value += GRAVITY;
-    birdY.value += birdVelocity.value;
-    birdRotation.value = Math.min(Math.max(birdVelocity.value * 3.5, -25), 80);
-
-    // Spawn
-    if (now - lastSpawn.current > PIPE_SPAWN_INTERVAL) {
-      lastSpawn.current = now;
-      const minG = PIPE_GAP / 2 + 60;
-      const maxG = GAME_H - PIPE_GAP / 2 - 60;
-      pipesRef.current.push({
-        id: pipeId.current++,
-        x: SW + PIPE_WIDTH,
-        gapY: minG + Math.random() * (maxG - minG),
-        scored: false,
-      });
-    }
-
-    const active: Pipe[] = [];
-    for (const p of pipesRef.current) {
-      p.x -= PIPE_SPEED;
-      if (!p.scored && p.x + PIPE_WIDTH < BIRD_X - BIRD_W / 2) {
-        p.scored = true;
-        runOnJS(handleScore)();
+      // Ground scrolling (menu + playing, not gameover)
+      if (gsRef.current !== "gameover") {
+        groundXRef.current -= PIPE_SPEED;
+        if (groundXRef.current <= -48) groundXRef.current = 0;
+        setGroundX(groundXRef.current);
       }
-      if (p.x + PIPE_WIDTH > -10) active.push(p);
-    }
-    pipesRef.current = active;
-    runOnJS(syncPipes)(active);
 
-    if (checkCollision(birdY.value, active)) runOnJS(handleGameOver)();
-  });
+      if (gsRef.current === "playing") {
+        // Bird physics
+        birdVelRef.current += GRAVITY;
+        birdYRef.current += birdVelRef.current;
+        birdRotRef.current = Math.min(
+          Math.max(birdVelRef.current * 3.5, -25),
+          80
+        );
+        setBirdTop(birdYRef.current);
+        setBirdRot(birdRotRef.current);
+
+        // Track time for spawning
+        if (lastTimeRef.current === 0) lastTimeRef.current = timestamp;
+        const elapsed = timestamp - lastTimeRef.current;
+
+        // Spawn pipes
+        if (
+          elapsed - lastSpawnRef.current > PIPE_SPAWN_INTERVAL ||
+          pipesRef.current.length === 0
+        ) {
+          lastSpawnRef.current = elapsed;
+          const minG = PIPE_GAP / 2 + 60;
+          const maxG = GAME_H - PIPE_GAP / 2 - 60;
+          pipesRef.current.push({
+            id: pipeIdRef.current++,
+            x: SW + PIPE_WIDTH,
+            gapY: minG + Math.random() * (maxG - minG),
+            scored: false,
+          });
+        }
+
+        // Move pipes and check scoring
+        const active: Pipe[] = [];
+        let newScore = scoreRef.current;
+        for (const p of pipesRef.current) {
+          p.x -= PIPE_SPEED;
+          if (!p.scored && p.x + PIPE_WIDTH < BIRD_X - BIRD_W / 2) {
+            p.scored = true;
+            newScore++;
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          }
+          if (p.x + PIPE_WIDTH > -10) active.push(p);
+        }
+        pipesRef.current = active;
+
+        if (newScore !== scoreRef.current) {
+          scoreRef.current = newScore;
+          setScore(newScore);
+        }
+
+        // Update pipe state for rendering
+        setPipes(active.map((p) => ({ ...p })));
+
+        // Collision
+        if (checkCollision(birdYRef.current, active)) {
+          gsRef.current = "gameover";
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+          setGameState("gameover");
+          setBestScore((prev) => Math.max(prev, scoreRef.current));
+        }
+      }
+
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    rafRef.current = requestAnimationFrame(tick);
+    return () => {
+      running = false;
+      cancelAnimationFrame(rafRef.current);
+    };
+  }, [SW, GAME_H, BIRD_X, checkCollision]);
 
   // ---- input ----
   const onTap = useCallback(() => {
     if (gameState === "menu") {
-      birdY.value = GAME_H * 0.42;
-      birdVelocity.value = JUMP_FORCE;
-      birdRotation.value = -25;
+      birdYRef.current = GAME_H * 0.42;
+      birdVelRef.current = JUMP_FORCE;
+      birdRotRef.current = -25;
       pipesRef.current = [];
       scoreRef.current = 0;
-      pipeId.current = 0;
-      lastSpawn.current = 0;
+      pipeIdRef.current = 0;
+      lastSpawnRef.current = 0;
+      lastTimeRef.current = 0;
       setScore(0);
       setPipes([]);
+      setBirdTop(GAME_H * 0.42);
+      setBirdRot(-25);
       setGameState("playing");
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     } else if (gameState === "playing") {
-      birdVelocity.value = JUMP_FORCE;
-      birdRotation.value = -25;
+      birdVelRef.current = JUMP_FORCE;
+      birdRotRef.current = -25;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } else {
-      birdY.value = GAME_H * 0.42;
-      birdVelocity.value = 0;
-      birdRotation.value = 0;
+      birdYRef.current = GAME_H * 0.42;
+      birdVelRef.current = 0;
+      birdRotRef.current = 0;
       pipesRef.current = [];
       scoreRef.current = 0;
-      pipeId.current = 0;
-      lastSpawn.current = 0;
+      pipeIdRef.current = 0;
+      lastSpawnRef.current = 0;
+      lastTimeRef.current = 0;
       setScore(0);
       setPipes([]);
+      setBirdTop(GAME_H * 0.42);
+      setBirdRot(0);
       setGameState("menu");
     }
-  }, [gameState, GAME_H, birdY, birdVelocity, birdRotation]);
+  }, [gameState, GAME_H]);
 
   // ---- clouds (static decoration) ----
   const clouds = useMemo(
@@ -224,10 +252,10 @@ export default function FlappyBird() {
   );
 
   const medal = useMemo(() => {
-    if (score >= 40) return { emoji: "🏆", label: "Champion", color: "#ffd700" };
-    if (score >= 20) return { emoji: "🥇", label: "Gold", color: "#ffd700" };
-    if (score >= 10) return { emoji: "🥈", label: "Silver", color: "#c0c0c0" };
-    if (score >= 5) return { emoji: "🥉", label: "Bronze", color: "#cd7f32" };
+    if (score >= 40) return { emoji: "🏆", label: "Champion" };
+    if (score >= 20) return { emoji: "🥇", label: "Gold" };
+    if (score >= 10) return { emoji: "🥈", label: "Silver" };
+    if (score >= 5) return { emoji: "🥉", label: "Bronze" };
     return null;
   }, [score]);
 
@@ -245,7 +273,6 @@ export default function FlappyBird() {
             backgroundColor: SKY_TOP,
           }}
         />
-        {/* Lower sky fade */}
         <View
           style={{
             position: "absolute",
@@ -295,20 +322,37 @@ export default function FlappyBird() {
         ))}
 
         {/* ======= BIRD ======= */}
-        <Animated.View
-          style={[
-            {
+        {gameState === "menu" ? (
+          <Animated.View
+            style={[
+              {
+                position: "absolute",
+                left: BIRD_X - BIRD_W / 2,
+                top: birdTop,
+                width: BIRD_W,
+                height: BIRD_H,
+                zIndex: 10,
+              },
+              birdMenuStyle,
+            ]}
+          >
+            <BirdSprite />
+          </Animated.View>
+        ) : (
+          <View
+            style={{
               position: "absolute",
               left: BIRD_X - BIRD_W / 2,
+              top: birdTop,
               width: BIRD_W,
               height: BIRD_H,
               zIndex: 10,
-            },
-            birdStyle,
-          ]}
-        >
-          <BirdSprite />
-        </Animated.View>
+              transform: [{ rotate: `${birdRot}deg` }],
+            }}
+          >
+            <BirdSprite />
+          </View>
+        )}
 
         {/* ======= GROUND ======= */}
         <View
@@ -321,10 +365,16 @@ export default function FlappyBird() {
             overflow: "hidden",
           }}
         >
-          {/* Grass top strip */}
           <View style={{ height: 18, backgroundColor: GROUND_GRASS }}>
-            {/* Grass pattern - repeating bumps */}
-            <Animated.View style={[{ flexDirection: "row", position: "absolute", top: -6, left: 0 }, groundStyle]}>
+            <View
+              style={{
+                flexDirection: "row",
+                position: "absolute",
+                top: -6,
+                left: 0,
+                transform: [{ translateX: groundX }],
+              }}
+            >
               {Array.from({ length: Math.ceil(SW / 24) + 4 }, (_, i) => (
                 <View
                   key={i}
@@ -337,11 +387,9 @@ export default function FlappyBird() {
                   }}
                 />
               ))}
-            </Animated.View>
+            </View>
           </View>
-          {/* Dirt body */}
           <View style={{ flex: 1, backgroundColor: GROUND_DIRT }}>
-            {/* Dirt stripe */}
             <View
               style={{
                 position: "absolute",
@@ -364,8 +412,15 @@ export default function FlappyBird() {
                 opacity: 0.25,
               }}
             />
-            {/* Dirt dots */}
-            <Animated.View style={[{ flexDirection: "row", position: "absolute", top: 14, left: 0 }, groundStyle]}>
+            <View
+              style={{
+                flexDirection: "row",
+                position: "absolute",
+                top: 14,
+                left: 0,
+                transform: [{ translateX: groundX }],
+              }}
+            >
               {Array.from({ length: Math.ceil(SW / 32) + 4 }, (_, i) => (
                 <View
                   key={i}
@@ -379,7 +434,7 @@ export default function FlappyBird() {
                   }}
                 />
               ))}
-            </Animated.View>
+            </View>
           </View>
         </View>
 
@@ -415,7 +470,6 @@ export default function FlappyBird() {
               alignItems: "center",
             }}
           >
-            {/* Title card */}
             <Animated.View
               entering={FadeInDown.duration(600).springify()}
               style={{
@@ -454,11 +508,7 @@ export default function FlappyBird() {
               }}
             >
               <Text
-                style={{
-                  fontSize: 18,
-                  fontWeight: "700",
-                  color: "#5a3a0a",
-                }}
+                style={{ fontSize: 18, fontWeight: "700", color: "#5a3a0a" }}
               >
                 Tap to Play
               </Text>
@@ -500,7 +550,6 @@ export default function FlappyBird() {
               zIndex: 30,
             }}
           >
-            {/* Game Over title */}
             <Animated.View
               entering={FadeInDown.duration(400).springify()}
               style={{ marginBottom: 20 }}
@@ -520,7 +569,6 @@ export default function FlappyBird() {
               </Text>
             </Animated.View>
 
-            {/* Score card */}
             <Animated.View
               entering={ZoomIn.delay(200).duration(400).springify()}
               style={{
@@ -535,25 +583,17 @@ export default function FlappyBird() {
                 borderColor: "#d4a843",
               }}
             >
-              {/* Medal */}
               {medal && (
                 <Animated.View
                   entering={ZoomIn.delay(500).duration(400).springify()}
-                  style={{
-                    marginBottom: 12,
-                  }}
+                  style={{ marginBottom: 12 }}
                 >
                   <Text style={{ fontSize: 44 }}>{medal.emoji}</Text>
                 </Animated.View>
               )}
 
-              {/* Scores row */}
               <View
-                style={{
-                  flexDirection: "row",
-                  gap: 32,
-                  marginBottom: 20,
-                }}
+                style={{ flexDirection: "row", gap: 32, marginBottom: 20 }}
               >
                 <View style={{ alignItems: "center" }}>
                   <Text
@@ -612,7 +652,6 @@ export default function FlappyBird() {
                 </View>
               </View>
 
-              {/* Play button */}
               <View
                 style={{
                   backgroundColor: "#73bf2e",
@@ -645,12 +684,11 @@ export default function FlappyBird() {
 }
 
 // ============================================================
-//  SCORE TEXT — outlined white text with dark stroke effect
+//  SCORE TEXT
 // ============================================================
 function ScoreText({ value, size }: { value: number; size: number }) {
   return (
     <View>
-      {/* Shadow layers for stroke effect */}
       {[
         { x: -2, y: 0 },
         { x: 2, y: 0 },
@@ -743,12 +781,11 @@ function Cloud({ x, y, w }: { x: number; y: number; w: number }) {
 }
 
 // ============================================================
-//  BIRD SPRITE — more detailed, larger
+//  BIRD SPRITE
 // ============================================================
 function BirdSprite() {
   return (
     <View style={{ width: BIRD_W, height: BIRD_H }}>
-      {/* Body */}
       <View
         style={{
           position: "absolute",
@@ -762,7 +799,6 @@ function BirdSprite() {
           boxShadow: "0px 2px 4px rgba(0,0,0,0.15)",
         }}
       >
-        {/* Belly */}
         <View
           style={{
             position: "absolute",
@@ -774,7 +810,6 @@ function BirdSprite() {
             borderRadius: 10,
           }}
         />
-        {/* Top highlight */}
         <View
           style={{
             position: "absolute",
@@ -788,8 +823,6 @@ function BirdSprite() {
           }}
         />
       </View>
-
-      {/* Wing */}
       <View
         style={{
           position: "absolute",
@@ -804,8 +837,6 @@ function BirdSprite() {
           borderColor: "#c48a10",
         }}
       />
-
-      {/* Eye white */}
       <View
         style={{
           position: "absolute",
@@ -821,7 +852,6 @@ function BirdSprite() {
           alignItems: "center",
         }}
       >
-        {/* Pupil */}
         <View
           style={{
             width: 7,
@@ -831,7 +861,6 @@ function BirdSprite() {
             marginLeft: 2,
           }}
         >
-          {/* Eye glint */}
           <View
             style={{
               position: "absolute",
@@ -845,8 +874,6 @@ function BirdSprite() {
           />
         </View>
       </View>
-
-      {/* Beak top */}
       <View
         style={{
           position: "absolute",
@@ -860,7 +887,6 @@ function BirdSprite() {
           zIndex: 2,
         }}
       />
-      {/* Beak bottom */}
       <View
         style={{
           position: "absolute",
@@ -874,8 +900,6 @@ function BirdSprite() {
           zIndex: 1,
         }}
       />
-
-      {/* Tail feathers */}
       <View
         style={{
           position: "absolute",
@@ -907,13 +931,7 @@ function BirdSprite() {
 // ============================================================
 //  PIPE
 // ============================================================
-function PipeView({
-  pipe,
-  gameH,
-}: {
-  pipe: Pipe;
-  gameH: number;
-}) {
+function PipeView({ pipe, gameH }: { pipe: Pipe; gameH: number }) {
   const gapTop = pipe.gapY - PIPE_GAP / 2;
   const gapBottom = pipe.gapY + PIPE_GAP / 2;
   const bottomH = gameH - gapBottom;
@@ -922,7 +940,7 @@ function PipeView({
 
   return (
     <>
-      {/* ---- TOP PIPE ---- */}
+      {/* TOP PIPE */}
       <View
         style={{
           position: "absolute",
@@ -932,7 +950,6 @@ function PipeView({
           height: gapTop,
         }}
       >
-        {/* Pipe shaft */}
         <View
           style={{
             flex: 1,
@@ -943,7 +960,6 @@ function PipeView({
             overflow: "hidden",
           }}
         >
-          {/* Highlight strip */}
           <View
             style={{
               position: "absolute",
@@ -956,7 +972,6 @@ function PipeView({
               borderRadius: 4,
             }}
           />
-          {/* Shadow strip */}
           <View
             style={{
               position: "absolute",
@@ -970,7 +985,6 @@ function PipeView({
             }}
           />
         </View>
-        {/* Cap */}
         <View
           style={{
             width: PIPE_WIDTH + CAP_OVERHANG * 2,
@@ -1011,7 +1025,7 @@ function PipeView({
         </View>
       </View>
 
-      {/* ---- BOTTOM PIPE ---- */}
+      {/* BOTTOM PIPE */}
       <View
         style={{
           position: "absolute",
@@ -1021,7 +1035,6 @@ function PipeView({
           height: bottomH,
         }}
       >
-        {/* Cap */}
         <View
           style={{
             width: PIPE_WIDTH + CAP_OVERHANG * 2,
@@ -1060,7 +1073,6 @@ function PipeView({
             }}
           />
         </View>
-        {/* Pipe shaft */}
         <View
           style={{
             flex: 1,
